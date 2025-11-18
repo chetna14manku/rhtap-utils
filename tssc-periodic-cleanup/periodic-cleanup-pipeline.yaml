@@ -1,0 +1,95 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: periodic-cleanup-pipeline
+spec:
+  tasks:
+      - name: repository-cleanup
+        taskSpec:
+          params:
+            - name: SCRIPT_PATH
+              type: string
+              description: The script path for the repository cleanup job.
+          volumes:
+            - name: tssc-cli-volume
+              secret:
+                secretName: rhtap-cli-install
+          steps:
+            - name: run-cleanup
+              image: quay.io/konflux-ci/tekton-integration-catalog/utils:latest
+              volumeMounts:
+                - name: tssc-cli-volume
+                  mountPath: /usr/local/rhtap-cli-install
+              script: |
+                #!/bin/bash
+                set -euo pipefail
+                echo "Starting cleanup job for script: $(params.SCRIPT_PATH)"
+                echo "Running cleanup job for: $(matrix.name)"
+                # Download and execute the cleanup script
+                curl -sL "$(params.SCRIPT_PATH)" | bash
+        matrix:
+          include:
+            - name: github-cleanup
+              params:
+                - name: SCRIPT_PATH
+                  value: "https://raw.githubusercontent.com/redhat-appstudio/rhtap-utils/refs/heads/main/git-org-cleanup/github-repos-cleanup.sh"
+            - name: gitlab-cleanup
+              params:
+                - name: SCRIPT_PATH
+                  value: "https://raw.githubusercontent.com/redhat-appstudio/rhtap-utils/refs/heads/main/git-org-cleanup/gitlab-repos-cleanup.sh"
+            - name: bitbucket-cleanup
+              params:
+                - name: SCRIPT_PATH
+                  value: "https://raw.githubusercontent.com/redhat-appstudio/rhtap-utils/refs/heads/main/git-org-cleanup/bitbucket-repos-cleanup.sh"
+  finally:
+    - name: notify-pipeline-status
+      when:
+        - input: "$(tasks.status)"
+          operator: in
+          values: ["Failed"]
+      taskSpec:
+        params:
+          - name: PIPELINE_STATUS
+            type: string
+        steps:
+          - name: send-notification
+            image: quay.io/konflux-ci/tekton-integration-catalog/utils:latest
+            env:
+              - name: SLACK_WEBHOOK_URL
+                valueFrom:
+                  secretKeyRef:
+                    name: rhtap-slack-webhook-notification
+                    key: slack_webhook_url
+              - name: STATUS
+                value: $(params.PIPELINE_STATUS)
+            script: |
+              #!/bin/bash
+              set -euo pipefail
+              
+              PIPELINE_NAME="$(context.pipeline.name)"
+              RUN_NAME="$(context.pipelinerun.name)"
+
+              COLOR="#36a64f"
+              ICON=":white_check_mark:"
+              MESSAGE="Pipeline *$PIPELINE_NAME* ($RUN_NAME) Succeeded."
+              
+              if [[ "$STATUS" == *Failed* ]]; then
+                COLOR="#d00000"
+                ICON=":x:"
+                MESSAGE="*CRITICAL FAILURE:* Pipeline *$PIPELINE_NAME* ($RUN_NAME) Failed."
+              fi
+              
+              echo "Notification prepared: $ICON $MESSAGE"
+              # curl -X POST -H 'Content-type: application/json' --data "{
+              #   \"attachments\": [
+              #     {
+              #       \"fallback\": \"Cleanup Pipeline Status: $STATUS\",
+              #       \"color\": \"$COLOR\",
+              #       \"text\": \"$ICON $MESSAGE\",
+              #       \"footer\": \"Tekton Cleanup Orchestrator\"
+              #     }
+              #   ]
+              # }" $SLACK_WEBHOOK_URL
+      params:
+        - name: PIPELINE_STATUS
+          value: "Overall Status: $(tasks.status)"
